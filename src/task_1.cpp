@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <opencv2/opencv.hpp>
 
 #include "io/camera.hpp"
@@ -41,11 +43,50 @@ int main(int argc, char * argv[])
   cv::Mat img;
   Eigen::Quaterniond q;
   std::chrono::steady_clock::time_point t;
+  int frame_count = 0;
 
   while (!exiter.exit()) {
-    // Your code start
+    camera.read(img, t);
+    q = gimbal.q(t);
+    solver.set_R_gimbal2world(q);
 
-    // Your code end
+    auto armors = yolo.detect(img, frame_count++);
+    cv::waitKey(1);
+
+    // 先完成所有装甲板的 PnP，再从有效检测中选择置信度最高的目标。
+    auto best = armors.end();
+    for (auto it = armors.begin(); it != armors.end(); ++it) {
+      solver.solve(*it);
+      const auto ypd = tools::xyz2ypd(it->xyz_in_gimbal);
+      if (!it->xyz_in_gimbal.allFinite() || !ypd.allFinite() || ypd[2] <= 0.05) continue;
+
+      if (best == armors.end() || it->confidence > best->confidence ||
+          (it->confidence == best->confidence &&
+           tools::xyz2ypd(it->xyz_in_gimbal)[2] < tools::xyz2ypd(best->xyz_in_gimbal)[2])) {
+        best = it;
+      }
+    }
+
+    if (best == armors.end()) {
+      gimbal.send(false, false, 0.0F, 0.0F);
+      plotter.plot({{"yaw", 0.0}, {"pitch", 0.0}, {"fire", 0.0}});
+      continue;
+    }
+
+    const auto ypd = tools::xyz2ypd(best->xyz_in_gimbal);
+    if (!ypd.allFinite() || ypd[2] <= 0.05) {
+      gimbal.send(false, false, 0.0F, 0.0F);
+      plotter.plot({{"yaw", 0.0}, {"pitch", 0.0}, {"fire", 0.0}});
+      continue;
+    }
+
+    gimbal.send(true, false, static_cast<float>(ypd[0]), static_cast<float>(ypd[1]));
+    plotter.plot({
+      {"yaw", ypd[0]},
+      {"pitch", ypd[1]},
+      {"distance", ypd[2]},
+      {"fire", 0.0}
+    });
   }
 
   return 0;
